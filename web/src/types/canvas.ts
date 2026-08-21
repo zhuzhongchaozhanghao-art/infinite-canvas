@@ -35,6 +35,15 @@ export type CanvasNodeImage = {
     naturalHeight: number;
     bytes: number;
     mimeType: string;
+    prompt?: string;
+    generationIndex?: number;
+    generationType?: CanvasImageGenerationType;
+    model?: string;
+    size?: string;
+    quality?: string;
+    background?: string;
+    references?: string[];
+    favoriteAssetId?: string;
 };
 
 export type CanvasNodeMetadata = {
@@ -66,10 +75,12 @@ export type CanvasNodeMetadata = {
     naturalHeight?: number;
     freeResize?: boolean;
     images?: CanvasNodeImage[];
+    imageGroup?: boolean;
     primaryImageId?: string;
     storageKey?: string;
     mimeType?: string;
     bytes?: number;
+    favoriteAssetId?: string;
     durationMs?: number;
     groupId?: string;
     interactive?: boolean; // Plugin node interaction/move state; see CanvasNodeDefinition.interactionToggle.

@@ -126,6 +126,47 @@ const NODE_STATUS_IDLE = "idle" as const;
 const NODE_STATUS_LOADING = "loading" as const;
 const NODE_STATUS_SUCCESS = "success" as const;
 const NODE_STATUS_ERROR = "error" as const;
+
+function imageGroupFrameSize(count: number) {
+    const columns = Math.min(Math.max(count, 1), 3);
+    const rows = Math.ceil(Math.max(count, 1) / columns);
+    return { width: Math.max(420, columns * 178 + 32), height: 56 + rows * 171 + 28 };
+}
+
+function reindexGroupImages(images: CanvasNodeImage[]) {
+    return images.map((image, index) => ({ ...image, generationIndex: index + 1 }));
+}
+
+function canvasNodeToGroupImage(node: CanvasNodeData, generationIndex: number): CanvasNodeImage {
+    return {
+        id: nanoid(),
+        status: (node.metadata?.status === NODE_STATUS_ERROR ? NODE_STATUS_ERROR : NODE_STATUS_SUCCESS),
+        errorDetails: node.metadata?.errorDetails,
+        content: node.metadata?.content || "",
+        storageKey: node.metadata?.storageKey || "",
+        naturalWidth: node.metadata?.naturalWidth || node.width,
+        naturalHeight: node.metadata?.naturalHeight || node.height,
+        bytes: node.metadata?.bytes || 0,
+        mimeType: node.metadata?.mimeType || "image/png",
+        prompt: node.metadata?.prompt,
+        generationIndex,
+        generationType: node.metadata?.generationType,
+        model: node.metadata?.model,
+        size: node.metadata?.size,
+        quality: node.metadata?.quality,
+        background: node.metadata?.background,
+        references: node.metadata?.references,
+        favoriteAssetId: node.metadata?.favoriteAssetId,
+    };
+}
+
+function findImageGroupDropTarget(movedIds: Set<string>, nodes: CanvasNodeData[]) {
+    const moved = nodes.filter((node) => movedIds.has(node.id));
+    if (moved.length !== 1 || moved[0].type !== CanvasNodeType.Image || moved[0].metadata?.imageGroup || (moved[0].metadata?.images?.length || 0) > 1 || !moved[0].metadata?.content) return undefined;
+    const image = moved[0];
+    const center = { x: image.position.x + image.width / 2, y: image.position.y + image.height / 2 };
+    return [...nodes].reverse().find((node) => !movedIds.has(node.id) && node.type === CanvasNodeType.Image && (node.metadata?.imageGroup || (node.metadata?.images?.length || 0) > 1) && center.x >= node.position.x && center.x <= node.position.x + node.width && center.y >= node.position.y && center.y <= node.position.y + node.height);
+}
 export default function CanvasPage() {
     const [mounted, setMounted] = useState(false);
 
@@ -185,6 +226,7 @@ function InfiniteCanvasPage() {
     const isAiConfigReady = useConfigStore((state) => state.isAiConfigReady);
     const openConfigDialog = useConfigStore((state) => state.openConfigDialog);
     const addAsset = useAssetStore((state) => state.addAsset);
+    const removeAsset = useAssetStore((state) => state.removeAsset);
     const cleanupAssetImages = useAssetStore((state) => state.cleanupImages);
     const hydrated = useCanvasStore((state) => state.hydrated);
     const createProject = useCanvasStore((state) => state.createProject);
@@ -234,7 +276,6 @@ function InfiniteCanvasPage() {
     const [titleEditing, setTitleEditing] = useState(false);
     const [titleDraft, setTitleDraft] = useState("");
     const [historyState, setHistoryState] = useState({ canUndo: false, canRedo: false });
-    const [expandedImageNodeIds, setExpandedImageNodeIds] = useState<Set<string>>(new Set());
     const [isNodeDragging, setIsNodeDragging] = useState(false);
     const [isNodeResizing, setIsNodeResizing] = useState(false);
     const [dropTargetGroupId, setDropTargetGroupId] = useState<string | null>(null);
@@ -718,7 +759,6 @@ function InfiniteCanvasPage() {
             setAngleNodeId((current) => (current && allIds.has(current) ? null : current));
             setPreviewNodeId((current) => (current && allIds.has(current) ? null : current));
             setRunningNodeId((current) => (current && allIds.has(current) ? null : current));
-            setExpandedImageNodeIds((current) => new Set([...current].filter((nodeId) => !allIds.has(nodeId))));
             setContextMenu((current) => (current?.type === "node" && allIds.has(current.nodeId) ? null : current));
             cleanupCanvasFiles({ projectId, nodes: nodesRef.current.filter((node) => !allIds.has(node.id)), chatSessions });
         },
@@ -1078,11 +1118,31 @@ function InfiniteCanvasPage() {
         setDropTargetGroupId(null);
         if (dragRef.current.hasMoved && clientX != null && clientY != null) {
             const movedIds = new Set(initialPositions.map((item) => item.id));
+            const positionedNodes = nodesRef.current.map((node) => {
+                const initial = initialPositions.find((item) => item.id === node.id);
+                return initial ? { ...node, position: { x: initial.x + dx, y: initial.y + dy } } : node;
+            });
+            const imageGroupTarget = findImageGroupDropTarget(movedIds, positionedNodes);
+            const imageNode = imageGroupTarget ? positionedNodes.find((node) => movedIds.has(node.id)) : undefined;
+            if (imageGroupTarget && imageNode) {
+                setConnections((prev) => prev.filter((connection) => connection.fromNodeId !== imageNode.id && connection.toNodeId !== imageNode.id));
+                setSelectedNodeIds(new Set([imageGroupTarget.id]));
+                setDialogNodeId(imageGroupTarget.id);
+            }
             setNodes((prev) => {
                 const moved = prev.map((node) => {
                     const initial = initialPositions.find((item) => item.id === node.id);
                     return initial ? { ...node, position: { x: initial.x + dx, y: initial.y + dy } } : node;
                 });
+                if (imageGroupTarget && imageNode) {
+                    return moved
+                        .filter((node) => node.id !== imageNode.id)
+                        .map((node) => {
+                            if (node.id !== imageGroupTarget.id) return node;
+                            const images = reindexGroupImages([...(node.metadata?.images || []), canvasNodeToGroupImage(imageNode, (node.metadata?.images?.length || 0) + 1)]);
+                            return { ...node, metadata: { ...node.metadata, imageGroup: true, images, count: images.length, primaryImageId: undefined } };
+                        });
+                }
                 const targetGroup = findGroupDropTarget(movedIds, moved);
                 if (targetGroup) return snapNodesIntoGroup(movedIds, moved, targetGroup);
                 return moved.map((node) => {
@@ -1126,7 +1186,7 @@ function InfiniteCanvasPage() {
                     const initial = initialPositions.find((item) => item.id === node.id);
                     return initial ? { ...node, position: { x: initial.x + dx, y: initial.y + dy } } : node;
                 });
-                setDropTargetGroupId(findGroupDropTarget(movedIds, previewNodes)?.id || null);
+                setDropTargetGroupId(findImageGroupDropTarget(movedIds, previewNodes)?.id || findGroupDropTarget(movedIds, previewNodes)?.id || null);
 
                 if (rafRef.current) cancelAnimationFrame(rafRef.current);
                 rafRef.current = requestAnimationFrame(() => {
@@ -1444,77 +1504,6 @@ function InfiniteCanvasPage() {
         setNodes((prev) => prev.map((node) => (node.id === nodeId ? { ...node, title } : node)));
     }, []);
 
-    const toggleBatchExpanded = useCallback((nodeId: string) => {
-        setExpandedImageNodeIds((current) => {
-            const next = new Set(current);
-            if (next.has(nodeId)) next.delete(nodeId);
-            else next.add(nodeId);
-            return next;
-        });
-    }, []);
-
-    const setBatchPrimary = useCallback((nodeId: string, imageId: string) => {
-        setNodes((prev) =>
-            prev.map((node) => {
-                if (node.id !== nodeId) return node;
-                const image = node.metadata?.images?.find((item) => item.id === imageId);
-                if (!image?.content) return node;
-                const edge = Math.max(node.width, node.height);
-                const size = node.metadata?.freeResize ? { width: node.width, height: node.height } : fitNodeSize(image.naturalWidth, image.naturalHeight, edge, edge);
-                return {
-                    ...node,
-                    position: { x: node.position.x + node.width / 2 - size.width / 2, y: node.position.y + node.height / 2 - size.height / 2 },
-                    ...size,
-                    metadata: {
-                        ...node.metadata,
-                        content: image.content,
-                        storageKey: image.storageKey,
-                        naturalWidth: image.naturalWidth,
-                        naturalHeight: image.naturalHeight,
-                        bytes: image.bytes,
-                        mimeType: image.mimeType,
-                        primaryImageId: image.id,
-                    },
-                };
-            }),
-        );
-    }, []);
-
-    const duplicateBatchImage = useCallback((node: CanvasNodeData, imageId: string) => {
-        const image = node.metadata?.images?.find((item) => item.id === imageId);
-        if (!image?.content) return;
-        const id = nanoid();
-        const edge = Math.max(node.width, node.height);
-        const size = fitNodeSize(image.naturalWidth, image.naturalHeight, edge, edge);
-        const copy: CanvasNodeData = {
-            id,
-            type: CanvasNodeType.Image,
-            title: node.title,
-            position: { x: node.position.x + node.width * 2 + 96, y: node.position.y + node.height / 2 - size.height / 2 },
-            ...size,
-            metadata: {
-                content: image.content,
-                storageKey: image.storageKey,
-                naturalWidth: image.naturalWidth,
-                naturalHeight: image.naturalHeight,
-                bytes: image.bytes,
-                mimeType: image.mimeType,
-                status: NODE_STATUS_SUCCESS,
-                prompt: node.metadata?.prompt,
-                generationType: node.metadata?.generationType,
-                model: node.metadata?.model,
-                size: node.metadata?.size,
-                quality: node.metadata?.quality,
-                background: node.metadata?.background,
-                references: node.metadata?.references,
-            },
-        };
-        setNodes((prev) => [...prev, copy]);
-        setSelectedNodeIds(new Set([id]));
-        setSelectedConnectionId(null);
-        setDialogNodeId(id);
-    }, []);
-
     const handleNodePromptChange = useCallback((nodeId: string, prompt: string) => {
         setNodes((prev) => prev.map((node) => (node.id === nodeId ? { ...node, metadata: { ...node.metadata, prompt } } : node)));
     }, []);
@@ -1533,6 +1522,41 @@ function InfiniteCanvasPage() {
         if (!image?.content) return;
         saveAs(image.content, `canvas-image-${node.id}-${image.id}.${imageExtension(image.content)}`);
     }, []);
+
+    const reorderBatchImage = useCallback((nodeId: string, imageId: string, targetIndex: number) => {
+        setNodes((prev) => prev.map((node) => {
+            if (node.id !== nodeId) return node;
+            const images = [...(node.metadata?.images || [])];
+            const sourceIndex = images.findIndex((image) => image.id === imageId);
+            if (sourceIndex < 0) return node;
+            const [image] = images.splice(sourceIndex, 1);
+            images.splice(Math.max(0, Math.min(targetIndex, images.length)), 0, image);
+            return { ...node, metadata: { ...node.metadata, imageGroup: true, images: reindexGroupImages(images) } };
+        }));
+    }, []);
+
+    const favoriteBatchImage = useCallback((node: CanvasNodeData, imageId: string) => {
+        const image = node.metadata?.images?.find((item) => item.id === imageId);
+        if (!image?.content) return;
+        if (image.favoriteAssetId) {
+            removeAsset(image.favoriteAssetId);
+            setNodes((prev) => prev.map((item) => item.id === node.id ? { ...item, metadata: { ...item.metadata, images: item.metadata?.images?.map((current) => current.id === imageId ? { ...current, favoriteAssetId: undefined } : current) } } : item));
+            message.success(t("canvas.sidePanel.assetRemoved"));
+            return;
+        }
+        const prompt = image.prompt || node.metadata?.prompt || "";
+        const assetId = addAsset({
+            kind: "image",
+            title: prompt || t("canvas.projectPage.canvasImage"),
+            coverUrl: image.content,
+            tags: [],
+            source: "Canvas",
+            data: { dataUrl: image.storageKey ? "" : image.content, storageKey: image.storageKey, width: image.naturalWidth, height: image.naturalHeight, bytes: image.bytes || getDataUrlByteSize(image.content), mimeType: image.mimeType || "image/png" },
+            metadata: { source: "canvas", nodeId: node.id, imageId, prompt, generationIndex: image.generationIndex, generationType: image.generationType, model: image.model, size: image.size, quality: image.quality, background: image.background, references: image.references },
+        });
+        setNodes((prev) => prev.map((item) => item.id === node.id ? { ...item, metadata: { ...item.metadata, images: item.metadata?.images?.map((current) => current.id === imageId ? { ...current, favoriteAssetId: assetId } : current) } } : item));
+        message.success(t("common.addedToAssets"));
+    }, [addAsset, message, removeAsset, t]);
 
     const saveNodeAsset = useCallback(
         async (node: CanvasNodeData) => {
@@ -1561,7 +1585,7 @@ function InfiniteCanvasPage() {
             const dataUrl = node.metadata.storageKey ? "" : node.metadata.content;
             addAsset({
                 kind: "image",
-                title: node.metadata?.prompt?.slice(0, 24) || t("canvas.projectPage.canvasImage"),
+                title: node.metadata?.prompt || t("canvas.projectPage.canvasImage"),
                 coverUrl: node.metadata.content,
                 tags: [],
                 source: "Canvas",
@@ -1905,6 +1929,7 @@ function InfiniteCanvasPage() {
                                           errorDetails: undefined,
                                           freeResize: false,
                                           images: undefined,
+                                          imageGroup: undefined,
                                           generationType: undefined,
                                           model: undefined,
                                           size: undefined,
@@ -1957,6 +1982,37 @@ function InfiniteCanvasPage() {
     const handleDrop = useCallback(
         (event: ReactDragEvent<HTMLDivElement>) => {
             event.preventDefault();
+            const groupItem = event.dataTransfer.getData("application/x-infinite-canvas-image-group-item");
+            if (groupItem) {
+                try {
+                    const payload = JSON.parse(groupItem) as { nodeId: string; imageId: string };
+                    const group = nodesRef.current.find((node) => node.id === payload.nodeId && (node.metadata?.imageGroup || (node.metadata?.images?.length || 0) > 1));
+                    const image = group?.metadata?.images?.find((item) => item.id === payload.imageId);
+                    if (!group || !image?.content) return;
+                    const position = screenToCanvas(event.clientX, event.clientY);
+                    const nodeSize = fitNodeSize(image.naturalWidth, image.naturalHeight, 420, 420);
+                    const nodeId = nanoid();
+                    const imageNode: CanvasNodeData = {
+                        id: nodeId,
+                        type: CanvasNodeType.Image,
+                        title: image.prompt?.slice(0, 32) || group.title,
+                        position: { x: position.x - nodeSize.width / 2, y: position.y - nodeSize.height / 2 },
+                        ...nodeSize,
+                        metadata: { content: image.content, storageKey: image.storageKey, naturalWidth: image.naturalWidth, naturalHeight: image.naturalHeight, bytes: image.bytes, mimeType: image.mimeType, status: image.status, errorDetails: image.errorDetails, prompt: image.prompt || group.metadata?.prompt, generationType: image.generationType, model: image.model, size: image.size, quality: image.quality, background: image.background, references: image.references, favoriteAssetId: image.favoriteAssetId },
+                    };
+                    setNodes((prev) => [...prev.map((node) => {
+                        if (node.id !== group.id) return node;
+                        const images = reindexGroupImages(node.metadata?.images?.filter((item) => item.id !== image.id) || []);
+                        return { ...node, metadata: { ...node.metadata, imageGroup: true, images, count: images.length, primaryImageId: undefined } };
+                    }), imageNode]);
+                    setSelectedNodeIds(new Set([nodeId]));
+                    setSelectedConnectionId(null);
+                    setDialogNodeId(nodeId);
+                } catch {
+                    // Ignore malformed internal drag data.
+                }
+                return;
+            }
             const files = Array.from(event.dataTransfer.files).filter(
                 (item) => item.type.startsWith("image/") || item.type.startsWith("video/") || isAudioFile(item),
             );
@@ -2086,6 +2142,9 @@ function InfiniteCanvasPage() {
                     const parentPosition = sourceNode?.position || { x: 0, y: 0 };
                     const rootId = isEmptyImageNode ? nodeId : nanoid();
                     const imageIds = Array.from({ length: count }, () => nanoid());
+                    const isImageGroup = count > 1;
+                    const groupSize = imageGroupFrameSize(count);
+                    const rootSize = isImageGroup ? groupSize : { width: isEmptyImageNode ? sourceNode?.width || imageConfig.width : imageConfig.width, height: isEmptyImageNode ? sourceNode?.height || imageConfig.height : imageConfig.height };
                     pendingChildIds = [rootId];
                     const rootNode: CanvasNodeData = {
                         id: rootId,
@@ -2093,14 +2152,15 @@ function InfiniteCanvasPage() {
                         title: effectivePrompt.slice(0, 32) || "Generated Image",
                         position: {
                             x: isEmptyImageNode ? parentPosition.x : parentPosition.x + parentConfig.width + 96,
-                            y: parentPosition.y + parentConfig.height / 2 - imageConfig.height / 2,
+                            y: parentPosition.y + parentConfig.height / 2 - rootSize.height / 2,
                         },
-                        width: isEmptyImageNode ? sourceNode?.width || imageConfig.width : imageConfig.width,
-                        height: isEmptyImageNode ? sourceNode?.height || imageConfig.height : imageConfig.height,
+                        width: rootSize.width,
+                        height: rootSize.height,
                         metadata: {
                             prompt: effectivePrompt,
                             status: NODE_STATUS_LOADING,
-                            images: imageIds.map((id) => ({ id, status: NODE_STATUS_LOADING, content: "", storageKey: "", naturalWidth: 0, naturalHeight: 0, bytes: 0, mimeType: "" })),
+                            imageGroup: isImageGroup,
+                            images: imageIds.map((id, index) => ({ id, status: NODE_STATUS_LOADING, content: "", storageKey: "", naturalWidth: 0, naturalHeight: 0, bytes: 0, mimeType: "", prompt: effectivePrompt, generationIndex: index + 1, generationType, model: generationConfig.model, size: generationConfig.size, quality: generationConfig.quality, background: generationConfig.background, references: generationReferenceUrls(generationContext) })),
                             ...generationMetadata,
                         },
                     };
@@ -2156,11 +2216,13 @@ function InfiniteCanvasPage() {
                                     : await requestGeneration({ ...generationConfig, count: "1" }, effectivePrompt, { signal: controller.signal }).then((items) => items[0]);
                                 const uploaded = await uploadImage(image.dataUrl);
                                 const imageSize = fitNodeSize(uploaded.width, uploaded.height, imageConfig.width, imageConfig.height);
-                                const item: CanvasNodeImage = { id: imageId, status: NODE_STATUS_SUCCESS, content: uploaded.url, storageKey: uploaded.storageKey, naturalWidth: uploaded.width, naturalHeight: uploaded.height, bytes: uploaded.bytes, mimeType: uploaded.mimeType };
                                 setNodes((prev) =>
                                     prev.map((node) => {
                                         if (node.id !== rootId) return node;
+                                        const previousImage = node.metadata?.images?.find((image) => image.id === imageId);
+                                        const item: CanvasNodeImage = { ...previousImage, id: imageId, status: NODE_STATUS_SUCCESS, content: uploaded.url, storageKey: uploaded.storageKey, naturalWidth: uploaded.width, naturalHeight: uploaded.height, bytes: uploaded.bytes, mimeType: uploaded.mimeType };
                                         const images = node.metadata?.images?.map((image) => (image.id === imageId ? item : image)) || [];
+                                        if (node.metadata?.imageGroup) return { ...node, metadata: { ...node.metadata, images } };
                                         if (node.metadata?.primaryImageId) return { ...node, metadata: { ...node.metadata, images } };
                                         const center = { x: node.position.x + node.width / 2, y: node.position.y + node.height / 2 };
                                         return {
@@ -2491,7 +2553,9 @@ function InfiniteCanvasPage() {
                     : await requestGeneration(generationConfig, prompt, { signal: controller.signal }).then((items) => items[0]);
                 const uploadedImage = await uploadImage(image.dataUrl);
                 const imageConfig = NODE_DEFAULT_SIZE[CanvasNodeType.Image];
+                const previousGroupImage = imageId ? node.metadata?.images?.find((item) => item.id === imageId) : undefined;
                 const retryImage: CanvasNodeImage = {
+                    ...previousGroupImage,
                     id: imageId || node.metadata?.primaryImageId || nanoid(),
                     status: NODE_STATUS_SUCCESS,
                     content: uploadedImage.url,
@@ -2515,6 +2579,9 @@ function InfiniteCanvasPage() {
                 setNodes((prev) =>
                     prev.map((item) => {
                         if (item.id !== node.id) return item;
+                        if (item.metadata?.imageGroup && imageId) {
+                            return { ...item, metadata: { ...item.metadata, status: NODE_STATUS_SUCCESS, errorDetails: undefined, images: item.metadata.images?.map((current) => current.id === retryImage.id ? { ...retryImage, prompt, model: generationConfig.model, size: generationConfig.size, quality: generationConfig.quality, background: generationConfig.background } : current) } };
+                        }
                         const makePrimary = !imageId || !item.metadata?.content;
                         const edge = imageId ? Math.max(item.width, item.height) : 0;
                         const imageSize = imageId && item.metadata?.freeResize ? { width: item.width, height: item.height } : imageId ? fitNodeSize(uploadedImage.width, uploadedImage.height, edge, edge) : fitNodeSize(uploadedImage.width, uploadedImage.height, imageConfig.width, imageConfig.height);
@@ -2547,13 +2614,11 @@ function InfiniteCanvasPage() {
     );
 
     const deleteBatchImage = useCallback((nodeId: string, imageId: string) => {
-        const node = nodesRef.current.find((item) => item.id === nodeId);
-        if ((node?.metadata?.images?.length || 0) <= 2) setExpandedImageNodeIds((current) => new Set([...current].filter((id) => id !== nodeId)));
         setNodes((prev) =>
             prev.map((item) => {
                 if (item.id !== nodeId) return item;
-                const images = item.metadata?.images?.filter((image) => image.id !== imageId) || [];
-                return { ...item, metadata: { ...item.metadata, images, count: images.length, primaryImageId: item.metadata?.primaryImageId === imageId ? images[0]?.id : item.metadata?.primaryImageId } };
+                const images = reindexGroupImages(item.metadata?.images?.filter((image) => image.id !== imageId) || []);
+                return { ...item, metadata: { ...item.metadata, imageGroup: Boolean(item.metadata?.imageGroup) || (item.metadata?.images?.length || 0) > 1, images, count: images.length, primaryImageId: undefined } };
             }),
         );
     }, []);
@@ -2828,7 +2893,6 @@ function InfiniteCanvasPage() {
                             showPanel={!isNodeResizing && dialogNodeId === node.id && !selectionBox && !getNodeDefinition(node.type)?.hidePanel}
                             groupChildCount={groupChildCountById.get(node.id) || 0}
                             isGroupDropTarget={dropTargetGroupId === node.id}
-                            batchExpanded={expandedImageNodeIds.has(node.id)}
                             showImageInfo={showImageInfo}
                             mentionReferences={mentionReferencesByNodeId.get(node.id) || EMPTY_REFERENCES}
                             pluginHost={pluginHost}
@@ -2845,10 +2909,9 @@ function InfiniteCanvasPage() {
                             onResizeEnd={handleNodeResizeEnd}
                             onContentChange={handleNodeContentChange}
                             onTitleChange={handleNodeTitleChange}
-                            onToggleBatch={toggleBatchExpanded}
-                            onSetBatchPrimary={setBatchPrimary}
-                            onDuplicateBatchImage={duplicateBatchImage}
                             onDownloadBatchImage={downloadBatchImage}
+                            onFavoriteBatchImage={favoriteBatchImage}
+                            onReorderBatchImage={reorderBatchImage}
                             onRetryBatchImage={retryBatchImage}
                             onDeleteBatchImage={deleteBatchImage}
                             onRetry={handleNodeRetry}
@@ -2885,7 +2948,7 @@ function InfiniteCanvasPage() {
                 </InfiniteCanvas>
 
                 <CanvasNodeHoverToolbar
-                    node={isNodeDragging || isNodeResizing || nodeImageSettingsOpen || expandedImageNodeIds.has(toolbarNode?.id || "") ? null : toolbarNode}
+                    node={isNodeDragging || isNodeResizing || nodeImageSettingsOpen ? null : toolbarNode}
                     viewport={viewport}
                     extraTools={toolbarNode ? buildNodeToolbarItems(toolbarNode) : undefined}
                     onKeep={keepNodeToolbar}

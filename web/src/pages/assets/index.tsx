@@ -536,5 +536,5 @@ function assetSummary(asset: Asset) {
 }
 
 function assetSearchText(asset: Asset) {
-    return [asset.title, asset.source || "", asset.note || "", (asset.tags || []).join(" "), asset.kind === "text" ? asset.data.content : asset.data.mimeType].join(" ").toLowerCase();
+    return [asset.title, asset.source || "", asset.note || "", (asset.tags || []).join(" "), typeof asset.metadata?.prompt === "string" ? asset.metadata.prompt : "", asset.kind === "text" ? asset.data.content : asset.data.mimeType].join(" ").toLowerCase();
 }

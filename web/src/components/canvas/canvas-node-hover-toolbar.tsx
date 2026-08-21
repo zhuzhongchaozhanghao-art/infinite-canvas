@@ -216,6 +216,9 @@ export function CanvasNodeInfoModal({ node, open, onClose }: { node: CanvasNodeD
     const [view, setView] = useState<"info" | "json">("info");
     const imageBytes = node?.type === CanvasNodeType.Image && node.metadata?.content ? getDataUrlByteSize(node.metadata.content) : 0;
     const batchCount = node?.type === CanvasNodeType.Image ? node.metadata?.images?.length || 0 : 0;
+    const isImageGroup = node?.type === CanvasNodeType.Image && (Boolean(node.metadata?.imageGroup) || batchCount > 1);
+    const hasOriginalResolution = Boolean(node?.metadata?.naturalWidth && node?.metadata?.naturalHeight);
+    const originalResolution = hasOriginalResolution ? `${Math.round(node?.metadata?.naturalWidth || 0)} × ${Math.round(node?.metadata?.naturalHeight || 0)} px` : t("canvas.nodeToolbar.unknown");
     const json = useMemo(() => {
         if (!node) return "";
         return JSON.stringify(
@@ -258,10 +261,18 @@ export function CanvasNodeInfoModal({ node, open, onClose }: { node: CanvasNodeD
                             <InfoRow label="ID" value={node.id} />
                             <InfoRow label={t("canvas.nodeToolbar.name")} value={node.title || t("canvas.node.untitled")} />
                             <InfoRow label={t("canvas.nodeToolbar.type")} value={node.type === CanvasNodeType.Group ? t("canvas.node.group") : node.type === CanvasNodeType.Config ? t("canvas.configNode.title") : [CanvasNodeType.Image, CanvasNodeType.Video, CanvasNodeType.Audio, CanvasNodeType.Text].includes(node.type as CanvasNodeType) ? t(`assets.kinds.${node.type}`) : getNodeDefinition(node.type)?.title || node.type} />
-                            <InfoRow label={t("canvas.nodeToolbar.size")} value={`${Math.round(node.width)} x ${Math.round(node.height)}`} />
+                            <InfoRow label={t("canvas.nodeToolbar.canvasSize")} value={`${Math.round(node.width)} × ${Math.round(node.height)}`} />
                             <InfoRow label={t("canvas.nodeToolbar.position")} value={`${Math.round(node.position.x)}, ${Math.round(node.position.y)}`} />
                             <InfoRow label={t("canvas.nodeToolbar.status")} value={node.metadata?.status || "idle"} />
-                            {batchCount > 1 ? <InfoRow label={t("canvas.nodeToolbar.imageGroup")} value={t("canvas.configNode.images", { count: batchCount })} /> : null}
+                            {isImageGroup ? <InfoRow label={t("canvas.nodeToolbar.imageGroup")} value={t("canvas.configNode.images", { count: batchCount })} /> : null}
+                            {isImageGroup
+                                ? node.metadata?.images?.map((image, index) => {
+                                      const hasResolution = Boolean(image.naturalWidth && image.naturalHeight);
+                                      const value = hasResolution ? `${Math.round(image.naturalWidth)} × ${Math.round(image.naturalHeight)} px` : t("canvas.nodeToolbar.unknown");
+                                      return <InfoRow key={image.id} label={t("canvas.nodeToolbar.imageIndex", { index: index + 1 })} value={value} />;
+                                  })
+                                : null}
+                            {!isImageGroup && (node.type === CanvasNodeType.Image || node.type === CanvasNodeType.Video) ? <InfoRow label={t("canvas.nodeToolbar.originalResolution")} value={originalResolution} /> : null}
                             {node.metadata?.prompt ? <InfoRow label={t("canvas.configNode.prompt")} value={node.metadata.prompt} /> : null}
                             {imageBytes ? <InfoRow label={t("canvas.nodeToolbar.imageSize")} value={formatBytes(imageBytes)} /> : null}
                             {node.metadata?.errorDetails ? (
